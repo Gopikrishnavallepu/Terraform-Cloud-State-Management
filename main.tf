@@ -1,104 +1,59 @@
 provider "aws" {
-  region = "us-east-1"
+  region = var.aws_region
 }
 
-# 1. IAM Role for Lambda
-resource "aws_iam_role" "lambda_exec_role" {
-  name = "lambda_exec_role"
+# IAM Module
+module "iam" {
+  source = "./modules/iam"
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [{
-      Effect = "Allow",
-      Principal = {
-        Service = "lambda.amazonaws.com"
-      },
-      Action = "sts:AssumeRole"
-    }]
-  })
+  iam_role_name = var.iam_role_name
+  policy_arn    = var.lambda_policy_arn
 }
 
-resource "aws_iam_role_policy_attachment" "lambda_policy" {
-  role       = aws_iam_role.lambda_exec_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+# S3 Module
+module "s3" {
+  source = "./modules/s3"
+
+  bucket_name       = var.bucket_name
+  force_destroy     = var.s3_force_destroy
+  enable_versioning = var.s3_enable_versioning
 }
 
-# 2. SSM Parameter (used as config)
-resource "aws_ssm_parameter" "app_config" {
-  name        = "/demo/config"
-  type        = "String"
-  value       = "example-value"
-  description = "Demo app config"
+# SSM Module
+module "ssm" {
+  source = "./modules/ssm"
+
+  parameter_name        = var.ssm_parameter_name
+  parameter_type        = var.ssm_parameter_type
+  parameter_value       = var.ssm_parameter_value
+  parameter_description = var.ssm_parameter_description
 }
 
-# 3. S3 Bucket
-resource "aws_s3_bucket" "demo_bucket" {
-  bucket        = "demo-zero-cost-bucket-${random_id.rand.hex}"
-  force_destroy = true
+# Lambda Module
+module "lambda" {
+  source = "./modules/lambda"
+
+  function_name        = var.lambda_function_name
+  lambda_exec_role_arn = module.iam.lambda_exec_role_arn
+  handler              = var.lambda_handler
+  runtime              = var.lambda_runtime
+  timeout              = var.lambda_timeout
+  bucket_name          = module.s3.bucket_name
+  config_param_name    = module.ssm.parameter_name
 }
 
-resource "random_id" "rand" {
-  byte_length = 4
-}
+# API Gateway Module
+module "api_gateway" {
+  source = "./modules/api_gateway"
 
-# 4. Lambda function
-data "archive_file" "lambda_zip" {
-  type        = "zip"
-  output_path = "${path.module}/lambda.zip"
-
-  source {
-    content  = file("${path.module}/lambda/index.js")
-    filename = "index.js"
-  }
-}
-
-resource "aws_lambda_function" "demo_lambda" {
-  function_name    = "demo-zero-cost-fn"
-  role             = aws_iam_role.lambda_exec_role.arn
-  handler          = "index.handler"
-  runtime          = "nodejs18.x"
-  filename         = data.archive_file.lambda_zip.output_path
-  source_code_hash = filebase64sha256(data.archive_file.lambda_zip.output_path)
-  timeout          = 5
-  environment {
-    variables = {
-      BUCKET_NAME  = aws_s3_bucket.demo_bucket.bucket
-      CONFIG_PARAM = aws_ssm_parameter.app_config.name
-    }
-  }
-}
-
-# 5. API Gateway to trigger Lambda
-resource "aws_apigatewayv2_api" "api" {
-  name          = "http-api"
-  protocol_type = "HTTP"
-}
-
-resource "aws_apigatewayv2_integration" "lambda_integration" {
-  api_id                 = aws_apigatewayv2_api.api.id
-  integration_type       = "AWS_PROXY"
-  integration_uri        = aws_lambda_function.demo_lambda.invoke_arn
-  integration_method     = "POST"
-  payload_format_version = "2.0"
-}
-
-resource "aws_apigatewayv2_route" "default" {
-  api_id    = aws_apigatewayv2_api.api.id
-  route_key = "GET /"
-  target    = "integrations/${aws_apigatewayv2_integration.lambda_integration.id}"
-}
-
-resource "aws_apigatewayv2_stage" "default" {
-  api_id      = aws_apigatewayv2_api.api.id
-  name        = "$default"
-  auto_deploy = true
-}
-
-# 6. Permission for API Gateway to invoke Lambda
-resource "aws_lambda_permission" "allow_apigw" {
-  statement_id  = "AllowAPIGatewayInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.demo_lambda.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
+  api_name               = var.api_gateway_name
+  protocol_type          = var.api_protocol_type
+  integration_type       = var.integration_type
+  lambda_invoke_arn      = module.lambda.invoke_arn
+  integration_method     = var.integration_method
+  payload_format_version = var.payload_format_version
+  route_key              = var.route_key
+  stage_name             = var.api_stage_name
+  auto_deploy            = var.auto_deploy
+  lambda_function_name   = module.lambda.function_name
 }
